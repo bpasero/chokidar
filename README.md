@@ -299,7 +299,7 @@ For more detailed changelog, see [`full_changelog.md`](.github/full_changelog.md
 
 * Paul Miller ([paulmillr](https://github.com/paulmillr))
 * Elan Shanker ([es128](https://github.com/es128))
-* Benjamin Pasero ([bpasero](https://github.com/bpasero), [LinkedIn](https://www.linkedin.com))
+* Benjamin Pasero ([bpasero](https://github.com/bpasero), [LinkedIn](https://www.linkedin.com), [X](https://x.com/bpasero))
 
 ## License
 
