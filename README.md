@@ -295,6 +295,12 @@ For more detailed changelog, see [`full_changelog.md`](.github/full_changelog.md
 - **v1 (Apr 7, 2015):** Glob support, symlink support, tons of bugfixes. Node 0.8+ is supported
 - **v0.1 (Apr 20, 2012):** Initial release, extracted from [Brunch](https://github.com/brunch/brunch/blob/9847a065aea300da99bd0753f90354cde9de1261/src/helpers.coffee#L66)
 
+## Contributors
+
+* Paul Miller ([paulmillr](https://github.com/paulmillr))
+* Elan Shanker ([es128](https://github.com/es128))
+* Benjamin Pasero ([bpasero](https://github.com/bpasero))
+
 ## License
 
 MIT (c) Paul Miller (<https://paulmillr.com>), see [LICENSE](LICENSE) file.
