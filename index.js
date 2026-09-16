@@ -1,3 +1,4 @@
+// Contributor: bpasero
 'use strict';
 
 const { EventEmitter } = require('events');
