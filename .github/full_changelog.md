@@ -1,3 +1,6 @@
+### Unreleased
+* Performance work in progress.
+
 ### Chokidar 3.4.0 (Apr 26, 2020)
 * Support for directory-based symlinks.
 * Fix a case on macos when replacing a file with a dir of the same name
