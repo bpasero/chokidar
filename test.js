@@ -27,6 +27,9 @@ const fs_rename = promisify(fs.rename);
 const fs_mkdir = promisify(fs.mkdir);
 const fs_rmdir = promisify(fs.rmdir);
 const fs_unlink = promisify(fs.unlink);
+const fs_open = promisify(fs.open);
+const fs_write = promisify(fs.write);
+const fs_close = promisify(fs.close);
 const pRimraf = promisify(rimraf);
 
 const FIXTURES_PATH_REL = 'test-fixtures';
@@ -111,6 +114,13 @@ const waitFor = async (spies) => {
 };
 
 const dateNow = () => Date.now().toString();
+
+// `fs.mkdirSync(path, {recursive: true})` is not available on Node 8
+const mkdirpSync = (dir) => {
+  if (fs.existsSync(dir)) return;
+  mkdirpSync(sysPath.dirname(dir));
+  fs.mkdirSync(dir, PERM_ARR);
+};
 
 const runTests = (baseopts) => {
   let macosFswatch;
@@ -2004,6 +2014,426 @@ const runTests = (baseopts) => {
       expect(closePromise).to.be.a('promise');
       expect(watcher.close()).to.be.equal(closePromise);
       await closePromise;
+    });
+  });
+  describe('end-to-end scenarios', () => {
+    beforeEach(() => {
+      options.ignoreInitial = true;
+    });
+    it('should emit `add`, `change` and `unlink` in order over a file lifecycle', async () => {
+      const testPath = getFixturePath('lifecycle.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      await write(testPath, 'one');
+      await waitFor([spy.withArgs(EV_ADD, testPath)]);
+
+      await delay(300);
+      await write(testPath, 'two');
+      await waitFor([spy.withArgs(EV_CHANGE, testPath)]);
+
+      await delay(300);
+      await fs_unlink(testPath);
+      await waitFor([spy.withArgs(EV_UNLINK, testPath)]);
+
+      const events = spy.args
+        .filter(([, path]) => path === testPath)
+        .map(([event]) => event);
+      expect(events[0]).to.equal(EV_ADD);
+      expect(events[events.length - 1]).to.equal(EV_UNLINK);
+      expect(events).to.include(EV_CHANGE);
+      expect(events.indexOf(EV_CHANGE)).to.be.above(events.indexOf(EV_ADD));
+    });
+    it('should emit `addDir` and `add` for every entry of a nested tree created at once', async () => {
+      const dirs = ['a', 'a/b', 'a/b/c'].map(getFixturePath);
+      const files = ['a/1.txt', 'a/b/2.txt', 'a/b/c/3.txt'].map(getFixturePath);
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      mkdirpSync(dirs[2]);
+      files.forEach((file) => fs.writeFileSync(file, dateNow()));
+
+      await waitFor(files.map((file) => spy.withArgs(EV_ADD, file)));
+      dirs.forEach((dir) => spy.should.have.been.calledWith(EV_ADD_DIR, dir));
+      files.forEach((file) => spy.should.have.been.calledWith(EV_ADD, file));
+      spy.should.not.have.been.calledWith(EV_UNLINK);
+      spy.should.not.have.been.calledWith(EV_UNLINK_DIR);
+    });
+    it('should emit `unlink` and `unlinkDir` for every entry of a removed nested tree', async () => {
+      const dirs = ['a', 'a/b', 'a/b/c'].map(getFixturePath);
+      const files = ['a/1.txt', 'a/b/2.txt', 'a/b/c/3.txt'].map(getFixturePath);
+      mkdirpSync(dirs[2]);
+      files.forEach((file) => fs.writeFileSync(file, dateNow()));
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await pRimraf(dirs[0]);
+
+      await waitFor(
+        files.map((file) => spy.withArgs(EV_UNLINK, file))
+          .concat(dirs.map((dir) => spy.withArgs(EV_UNLINK_DIR, dir)))
+      );
+      dirs.forEach((dir) => spy.should.have.been.calledWith(EV_UNLINK_DIR, dir));
+      files.forEach((file) => spy.should.have.been.calledWith(EV_UNLINK, file));
+      spy.should.not.have.been.calledWith(EV_ADD);
+      spy.should.not.have.been.calledWith(EV_ADD_DIR);
+    });
+    it('should emit `addDir` and `add` when a populated directory is moved into the watched tree', async () => {
+      const watched = getFixturePath('watched');
+      const outside = getFixturePath('outside');
+      await fs_mkdir(watched, PERM_ARR);
+      mkdirpSync(sysPath.join(outside, 'nested'));
+      await write(sysPath.join(outside, 'a.txt'), 'a');
+      await write(sysPath.join(outside, 'nested', 'b.txt'), 'b');
+      const watcher = chokidar_watch(watched, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      const moved = sysPath.join(watched, 'moved');
+      const movedFile = sysPath.join(moved, 'a.txt');
+      const movedNestedFile = sysPath.join(moved, 'nested', 'b.txt');
+
+      await delay(300);
+      await fs_rename(outside, moved);
+
+      await waitFor([spy.withArgs(EV_ADD, movedFile), spy.withArgs(EV_ADD, movedNestedFile)]);
+      spy.should.have.been.calledWith(EV_ADD_DIR, moved);
+      spy.should.have.been.calledWith(EV_ADD_DIR, sysPath.join(moved, 'nested'));
+      spy.should.have.been.calledWith(EV_ADD, movedFile);
+      spy.should.have.been.calledWith(EV_ADD, movedNestedFile);
+    });
+    it('should emit `unlinkDir` and `unlink` when a populated directory is moved out of the watched tree', async () => {
+      const watched = getFixturePath('watched');
+      const inner = sysPath.join(watched, 'inner');
+      const innerFile = sysPath.join(inner, 'a.txt');
+      const innerNested = sysPath.join(inner, 'nested');
+      const innerNestedFile = sysPath.join(innerNested, 'b.txt');
+      mkdirpSync(innerNested);
+      await write(innerFile, 'a');
+      await write(innerNestedFile, 'b');
+      const watcher = chokidar_watch(watched, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await fs_rename(inner, getFixturePath('outside'));
+
+      await waitFor([
+        spy.withArgs(EV_UNLINK_DIR, inner),
+        spy.withArgs(EV_UNLINK, innerFile),
+        spy.withArgs(EV_UNLINK, innerNestedFile)
+      ]);
+      spy.should.have.been.calledWith(EV_UNLINK_DIR, inner);
+      spy.should.have.been.calledWith(EV_UNLINK_DIR, innerNested);
+      spy.should.have.been.calledWith(EV_UNLINK, innerFile);
+      spy.should.have.been.calledWith(EV_UNLINK, innerNestedFile);
+      spy.should.not.have.been.calledWith(EV_ADD);
+    });
+    it('should emit events for both old and new paths when a directory is renamed', async () => {
+      const oldDir = getFixturePath('old');
+      const oldFile = sysPath.join(oldDir, 'file.txt');
+      const newDir = getFixturePath('new');
+      const newFile = sysPath.join(newDir, 'file.txt');
+      await fs_mkdir(oldDir, PERM_ARR);
+      await write(oldFile, 'content');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await fs_rename(oldDir, newDir);
+
+      await waitFor([
+        spy.withArgs(EV_UNLINK_DIR, oldDir),
+        spy.withArgs(EV_UNLINK, oldFile),
+        spy.withArgs(EV_ADD_DIR, newDir),
+        spy.withArgs(EV_ADD, newFile)
+      ]);
+      spy.should.have.been.calledWith(EV_UNLINK_DIR, oldDir);
+      spy.should.have.been.calledWith(EV_UNLINK, oldFile);
+      spy.should.have.been.calledWith(EV_ADD_DIR, newDir);
+      spy.should.have.been.calledWith(EV_ADD, newFile);
+
+      // the renamed directory must still be watched
+      spy.resetHistory();
+      await delay(300);
+      const laterFile = sysPath.join(newDir, 'later.txt');
+      await write(laterFile, 'later');
+      await waitFor([spy.withArgs(EV_ADD, laterFile)]);
+      spy.should.have.been.calledWith(EV_ADD, laterFile);
+    });
+    it('should handle file names with spaces and unicode characters', async () => {
+      const names = ['with space.txt', 'ünïcödé.txt', '日本語.txt', 'emoji-🙂.txt'];
+      const paths = names.map(getFixturePath);
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      for (const path of paths) await write(path, dateNow());
+      await waitFor(paths.map((path) => spy.withArgs(EV_ADD, path)));
+      paths.forEach((path) => spy.should.have.been.calledWith(EV_ADD, path));
+
+      await delay(300);
+      for (const path of paths) await fs_unlink(path);
+      await waitFor(paths.map((path) => spy.withArgs(EV_UNLINK, path)));
+      paths.forEach((path) => spy.should.have.been.calledWith(EV_UNLINK, path));
+    });
+    it('should emit a `change` for a file atomically replaced via rename', async () => {
+      const target = getFixturePath('change.txt');
+      const temp = getFixturePath('change.txt.tmp');
+      const watcher = chokidar_watch(target, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await write(temp, 'replaced content');
+      await fs_rename(temp, target);
+
+      await waitFor([spy.withArgs(EV_CHANGE, target)]);
+      // allow pending (atomic) unlinks to flush
+      await delay(300);
+      spy.should.have.been.calledWith(EV_CHANGE, target);
+      spy.should.not.have.been.calledWith(EV_UNLINK, target);
+      spy.should.not.have.been.calledWith(EV_ADD, temp);
+      expect(fs.readFileSync(target, 'utf-8')).to.equal('replaced content');
+    });
+    it('should coalesce unlink and re-add into `change` when atomic is enabled', async () => {
+      options.atomic = 500;
+      const testPath = getFixturePath('change.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await fs_unlink(testPath);
+      await write(testPath, 'recreated');
+
+      await waitFor([spy.withArgs(EV_CHANGE, testPath)]);
+      await delay(700);
+      spy.should.have.been.calledWith(EV_CHANGE, testPath);
+      spy.should.not.have.been.calledWith(EV_UNLINK, testPath);
+      spy.should.not.have.been.calledWith(EV_ADD, testPath);
+    });
+    it('should still emit `unlink` with atomic enabled when the file does not come back', async () => {
+      options.atomic = 100;
+      const testPath = getFixturePath('unlink.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await fs_unlink(testPath);
+      await waitFor([spy.withArgs(EV_UNLINK, testPath)]);
+      spy.should.have.been.calledWith(EV_UNLINK, testPath);
+      spy.should.not.have.been.calledWith(EV_CHANGE, testPath);
+    });
+    it('should not emit events for paths matched by an ignored glob, including in new subdirs', async () => {
+      options.ignored = '**/*.log';
+      const keep = getFixturePath('sub/keep.txt');
+      const ignoredFile = getFixturePath('sub/skip.log');
+      const ignoredTop = getFixturePath('top.log');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      await fs_mkdir(getFixturePath('sub'), PERM_ARR);
+      await write(ignoredTop, 'x');
+      await write(ignoredFile, 'x');
+      await write(keep, 'x');
+
+      await waitFor([spy.withArgs(EV_ADD, keep)]);
+      await delay(300);
+      await write(ignoredFile, 'y');
+      await fs_unlink(ignoredTop);
+      await delay(300);
+      spy.should.have.been.calledWith(EV_ADD_DIR, getFixturePath('sub'));
+      spy.should.have.been.calledWith(EV_ADD, keep);
+      spy.args.forEach(([, path]) => {
+        expect(path).to.not.match(/\.log$/);
+      });
+    });
+    it('should pass stats to an ignored function and allow filtering by type', async () => {
+      const seen = [];
+      options.ignored = (path, stats) => {
+        if (stats) seen.push(path);
+        return Boolean(stats && stats.isFile() && path.endsWith('.ignored'));
+      };
+      const dir = getFixturePath('dir.ignored');
+      const file = getFixturePath('file.ignored');
+      const kept = getFixturePath('kept.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      await write(file, 'x');
+      await fs_mkdir(dir, PERM_ARR);
+      await write(kept, 'x');
+
+      await waitFor([spy.withArgs(EV_ADD_DIR, dir), spy.withArgs(EV_ADD, kept)]);
+      await delay(300);
+      // a directory with a matching name is kept since the function only ignores files
+      spy.should.have.been.calledWith(EV_ADD_DIR, dir);
+      spy.should.have.been.calledWith(EV_ADD, kept);
+      spy.should.not.have.been.calledWith(EV_ADD, file);
+      expect(seen.length).to.be.above(0);
+    });
+    it('should start emitting events for a directory added via `add()` after ready', async () => {
+      const first = getFixturePath('first');
+      const second = getFixturePath('second');
+      await fs_mkdir(first, PERM_ARR);
+      await fs_mkdir(second, PERM_ARR);
+      const watcher = chokidar_watch(first, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      const beforeAdd = sysPath.join(second, 'before.txt');
+      await write(beforeAdd, 'x');
+      await delay(300);
+      spy.should.not.have.been.calledWith(EV_ADD, beforeAdd);
+
+      watcher.add(second);
+      await delay(300);
+      const afterAdd = sysPath.join(second, 'after.txt');
+      await write(afterAdd, 'x');
+      await waitFor([spy.withArgs(EV_ADD, afterAdd)]);
+      spy.should.have.been.calledWith(EV_ADD, afterAdd);
+      // ignoreInitial also applies to the paths found while adding
+      spy.should.not.have.been.calledWith(EV_ADD, beforeAdd);
+      expect(watcher.getWatched()[second]).to.include('after.txt');
+    });
+    it('should keep `getWatched()` in sync with files added and removed on disk', async () => {
+      const added = getFixturePath('added.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+      expect(watcher.getWatched()[currentDir]).to.include('unlink.txt');
+
+      await delay();
+      await write(added, 'x');
+      await fs_unlink(getFixturePath('unlink.txt'));
+      await waitFor([
+        spy.withArgs(EV_ADD, added),
+        spy.withArgs(EV_UNLINK, getFixturePath('unlink.txt'))
+      ]);
+      const children = watcher.getWatched()[currentDir];
+      expect(children).to.include('added.txt');
+      expect(children).to.include('change.txt');
+      expect(children).to.not.include('unlink.txt');
+    });
+    it('should keep other watchers on the same directory working after one is closed', async () => {
+      const watcher1 = chokidar_watch(currentDir, options);
+      const watcher2 = chokidar_watch(currentDir, options);
+      // subscribe to both watchers before awaiting, so neither `ready` is missed
+      const [spy1, spy2] = await Promise.all([
+        aspy(watcher1, EV_ALL, null, true),
+        aspy(watcher2, EV_ALL, null, true)
+      ]);
+
+      await delay();
+      const firstFile = getFixturePath('first.txt');
+      await write(firstFile, 'x');
+      await waitFor([spy1.withArgs(EV_ADD, firstFile), spy2.withArgs(EV_ADD, firstFile)]);
+      spy1.should.have.been.calledWith(EV_ADD, firstFile);
+      spy2.should.have.been.calledWith(EV_ADD, firstFile);
+
+      await watcher1.close();
+      spy1.resetHistory();
+      await delay(300);
+
+      const secondFile = getFixturePath('second.txt');
+      await write(secondFile, 'x');
+      await write(getFixturePath('change.txt'), dateNow());
+      await waitFor([
+        spy2.withArgs(EV_ADD, secondFile),
+        spy2.withArgs(EV_CHANGE, getFixturePath('change.txt'))
+      ]);
+      spy2.should.have.been.calledWith(EV_ADD, secondFile);
+      spy2.should.have.been.calledWith(EV_CHANGE, getFixturePath('change.txt'));
+      spy1.should.not.have.been.called;
+    });
+    it('should not emit any events when closed before becoming ready', async () => {
+      const spy = sinon.spy();
+      const readySpy = sinon.spy();
+      options.ignoreInitial = false;
+      const watcher = chokidar_watch(currentDir, options);
+      watcher.on(EV_ALL, spy).on(EV_READY, readySpy);
+      await watcher.close();
+
+      await write(getFixturePath('add.txt'), 'x');
+      await write(getFixturePath('change.txt'), dateNow());
+      await delay(500);
+      spy.should.not.have.been.called;
+      readySpy.should.not.have.been.called;
+      expect(watcher.getWatched()).to.deep.equal({});
+    });
+    it('should only report new entries up to the configured depth', async () => {
+      options.depth = 1;
+      const level1 = getFixturePath('l1');
+      const level2 = getFixturePath('l1/l2');
+      const level3 = getFixturePath('l1/l2/l3');
+      const level1File = sysPath.join(level1, 'a.txt');
+      const level2File = sysPath.join(level2, 'b.txt');
+      const level3File = sysPath.join(level3, 'c.txt');
+      const watcher = chokidar_watch(currentDir, options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay();
+      mkdirpSync(level3);
+      await write(level1File, 'x');
+      await write(level2File, 'x');
+      await write(level3File, 'x');
+
+      await waitFor([
+        spy.withArgs(EV_ADD_DIR, level1),
+        spy.withArgs(EV_ADD_DIR, level2),
+        spy.withArgs(EV_ADD, level1File)
+      ]);
+      await delay(300);
+      // depth 0 is the watched dir's children, depth 1 their children
+      spy.should.have.been.calledWith(EV_ADD_DIR, level1);
+      spy.should.have.been.calledWith(EV_ADD_DIR, level2);
+      spy.should.have.been.calledWith(EV_ADD, level1File);
+      spy.should.not.have.been.calledWith(EV_ADD, level2File);
+      spy.should.not.have.been.calledWith(EV_ADD_DIR, level3);
+      spy.should.not.have.been.calledWith(EV_ADD, level3File);
+    });
+    it('should emit `cwd`-relative paths for nested renames', async () => {
+      options.cwd = currentDir;
+      await fs_mkdir(getFixturePath('src'), PERM_ARR);
+      await write(getFixturePath('src/a.txt'), 'x');
+      const watcher = chokidar_watch('.', options);
+      const spy = await aspy(watcher, EV_ALL, null, true);
+
+      await delay(300);
+      await fs_rename(getFixturePath('src/a.txt'), getFixturePath('src/b.txt'));
+      await waitFor([
+        spy.withArgs(EV_UNLINK, sysPath.join('src', 'a.txt')),
+        spy.withArgs(EV_ADD, sysPath.join('src', 'b.txt'))
+      ]);
+      spy.should.have.been.calledWith(EV_UNLINK, sysPath.join('src', 'a.txt'));
+      spy.should.have.been.calledWith(EV_ADD, sysPath.join('src', 'b.txt'));
+      spy.args.forEach(([, path]) => {
+        expect(sysPath.isAbsolute(path)).to.be.false;
+      });
+    });
+    it('should emit stats reflecting the latest content when alwaysStat is enabled', async () => {
+      options.alwaysStat = true;
+      const testPath = getFixturePath('change.txt');
+      const content = 'a much longer piece of content than before';
+      const watcher = chokidar_watch(testPath, options);
+      const spy = await aspy(watcher, EV_CHANGE);
+
+      await delay(300);
+      // overwrite in place with a single write, so that there is no
+      // intermediate truncated state that could be reported instead
+      const fd = await fs_open(testPath, 'r+');
+      try {
+        await fs_write(fd, content, 0);
+      } finally {
+        await fs_close(fd);
+      }
+      await waitFor([spy]);
+      spy.should.have.been.calledWith(testPath);
+      const stats = spy.args[spy.args.length - 1][1];
+      expect(stats).to.be.ok;
+      expect(stats.isFile()).to.be.true;
+      expect(stats.size).to.equal(Buffer.byteLength(content));
     });
   });
   describe('env variable option override', () => {
