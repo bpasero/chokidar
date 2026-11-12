@@ -115,6 +115,13 @@ const waitFor = async (spies) => {
 
 const dateNow = () => Date.now().toString();
 
+// `fs.mkdirSync(path, {recursive: true})` is not available on Node 8
+const mkdirpSync = (dir) => {
+  if (fs.existsSync(dir)) return;
+  mkdirpSync(sysPath.dirname(dir));
+  fs.mkdirSync(dir, PERM_ARR);
+};
+
 const runTests = (baseopts) => {
   let macosFswatch;
   let win32Polling;
@@ -2045,7 +2052,7 @@ const runTests = (baseopts) => {
       const spy = await aspy(watcher, EV_ALL, null, true);
 
       await delay();
-      fs.mkdirSync(dirs[2], {recursive: true, mode: PERM_ARR});
+      mkdirpSync(dirs[2]);
       files.forEach((file) => fs.writeFileSync(file, dateNow()));
 
       await waitFor(files.map((file) => spy.withArgs(EV_ADD, file)));
@@ -2057,7 +2064,7 @@ const runTests = (baseopts) => {
     it('should emit `unlink` and `unlinkDir` for every entry of a removed nested tree', async () => {
       const dirs = ['a', 'a/b', 'a/b/c'].map(getFixturePath);
       const files = ['a/1.txt', 'a/b/2.txt', 'a/b/c/3.txt'].map(getFixturePath);
-      fs.mkdirSync(dirs[2], {recursive: true, mode: PERM_ARR});
+      mkdirpSync(dirs[2]);
       files.forEach((file) => fs.writeFileSync(file, dateNow()));
       const watcher = chokidar_watch(currentDir, options);
       const spy = await aspy(watcher, EV_ALL, null, true);
@@ -2078,7 +2085,7 @@ const runTests = (baseopts) => {
       const watched = getFixturePath('watched');
       const outside = getFixturePath('outside');
       await fs_mkdir(watched, PERM_ARR);
-      fs.mkdirSync(sysPath.join(outside, 'nested'), {recursive: true, mode: PERM_ARR});
+      mkdirpSync(sysPath.join(outside, 'nested'));
       await write(sysPath.join(outside, 'a.txt'), 'a');
       await write(sysPath.join(outside, 'nested', 'b.txt'), 'b');
       const watcher = chokidar_watch(watched, options);
@@ -2103,7 +2110,7 @@ const runTests = (baseopts) => {
       const innerFile = sysPath.join(inner, 'a.txt');
       const innerNested = sysPath.join(inner, 'nested');
       const innerNestedFile = sysPath.join(innerNested, 'b.txt');
-      fs.mkdirSync(innerNested, {recursive: true, mode: PERM_ARR});
+      mkdirpSync(innerNested);
       await write(innerFile, 'a');
       await write(innerNestedFile, 'b');
       const watcher = chokidar_watch(watched, options);
@@ -2367,7 +2374,7 @@ const runTests = (baseopts) => {
       const spy = await aspy(watcher, EV_ALL, null, true);
 
       await delay();
-      fs.mkdirSync(level3, {recursive: true, mode: PERM_ARR});
+      mkdirpSync(level3);
       await write(level1File, 'x');
       await write(level2File, 'x');
       await write(level3File, 'x');
